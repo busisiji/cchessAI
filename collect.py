@@ -5,6 +5,7 @@ import os
 import copy
 import argparse
 from collections import deque
+from multiprocessing import Pool, cpu_count
 from net import PolicyValueNet
 from mcts import MCTS_AI
 from game import Game
@@ -68,47 +69,40 @@ class CollectPipeline:
             )
         return mirror_data
 
+    def collect_single_game(self, is_shown=False):
+        """单个进程执行一次对弈"""
+        self.load_model()  # 从本体处加载最新模型
+        winner, play_data = self.game.start_self_play(
+            self.mcts_ai, is_shown=is_shown
+        )  # 开始自我对弈
+        play_data = list(play_data)  # 转换为列表
+        play_data = self.mirror_data(play_data)  # 扩充数据
+        return play_data
+
     def collect_data(self, n_games=1, is_shown=False):
-        """收集自我对弈的数据"""
-        for i in range(n_games):
-            self.load_model()  # 从本体处加载最新模型
-            winner, play_data = self.game.start_self_play(
-                self.mcts_ai, is_shown=is_shown
-            )  # 开始自我对弈
-            play_data = list(play_data)  # 转换为列表
-            self.episode_len = len(play_data)  # 记录每盘对局长度
-            # 增加数据
-            play_data = self.mirror_data(play_data)
-            if os.path.exists(DATA_BUFFER_PATH):
-                while True:
-                    try:
-                        with open(DATA_BUFFER_PATH, "rb") as data_dict:
-                            data_file = pickle.load(data_dict)
-                            self.data_buffer = deque(maxlen=self.buffer_size)
-                            self.data_buffer.extend(data_file["data_buffer"])
-                            self.iters = data_file["iters"]
-                            del data_file
-                            self.iters += 1
-                            self.data_buffer.extend(play_data)
-                        print(f"[{time.strftime('%H:%M:%S')}] 成功载入数据")
-                        break
-                    except:
-                        time.sleep(30)
-            else:
+        """使用多进程收集自我对弈的数据"""
+        with Pool(processes=cpu_count()) as pool:
+            results = pool.starmap(
+                self.collect_single_game, [(is_shown,) for _ in range(n_games)]
+            )
+            for play_data in results:
                 self.data_buffer.extend(play_data)
-                self.iters += 1
-            data_dict = {"data_buffer": self.data_buffer, "iters": self.iters}
-            with open(DATA_BUFFER_PATH, "wb") as data_file:
-                pickle.dump(data_dict, data_file)
+
+        self.iters += 1
+        data_dict = {"data_buffer": self.data_buffer, "iters": self.iters}
+        with open(DATA_BUFFER_PATH, "wb") as data_file:
+            pickle.dump(data_dict, data_file)
+
+        print(f"[{time.strftime('%H:%M:%S')}] batch i: {self.iters}, 数据已保存")
         return self.iters
 
-    def run(self, is_shown=False):
+    def run(self, n_games_per_iter=1, is_shown=False):
         """开始收集数据"""
         try:
             while True:
-                iters = self.collect_data(is_shown=is_shown)
+                iters = self.collect_data(n_games=n_games_per_iter, is_shown=is_shown)
                 print(
-                    f"[{time.strftime('%H:%M:%S')}] batch i: {iters}, episode_len: {self.episode_len}"
+                    f"[{time.strftime('%H:%M:%S')}] batch i: {iters}, 当前共收集了 {len(self.data_buffer)} 条数据"
                 )
         except KeyboardInterrupt:
             print(f"\n\r[{time.strftime('%H:%M:%S')}] quit")
@@ -118,9 +112,20 @@ if __name__ == "__main__":
     # 添加命令行参数解析
     parser = argparse.ArgumentParser(description="收集中国象棋自对弈数据")
     parser.add_argument(
-        "--show", action="store_true", default=True, help="是否显示棋盘对弈过程"
+        "--show", action="store_true", default=False, help="是否显示棋盘对弈过程"
+    )
+    parser.add_argument(
+        "--games",
+        type=int,
+        default=4,
+        help="每次迭代中并行运行的对局数量（默认：CPU核心数）",
     )
     args = parser.parse_args()
+
     # 创建数据收集管道实例
     collecting_pipeline = CollectPipeline(init_model="current_policy.pkl")
-    collecting_pipeline.run(is_shown=args.show)
+
+    # 动态设置对局数量，默认为 CPU 核心数
+    n_games = args.games if args.games > 0 else cpu_count()
+
+    collecting_pipeline.run(n_games_per_iter=n_games, is_shown=args.show)
