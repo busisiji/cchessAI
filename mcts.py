@@ -1,7 +1,7 @@
 import numpy as np
 import cchess
 from parameters import C_PUCT, EPS, ALPHA
-from tools import is_tie, move_id2move_action, softmax
+from tools import is_tie, move_id2move_action, softmax, decode_board
 
 
 class Node(object):
@@ -55,9 +55,12 @@ class MCTS(object):
 
     def __init__(self, policy_value_fn, c_puct=5, n_playout=2000):
         self.root = Node(None, 1.0)
-        self.policy = policy_value_fn
+        self.policy = policy_value_fn  # 可能是 PolicyValueNet 的 batch_policy_value
         self.c_puct = c_puct
         self.n_playout = n_playout
+        self.batch_size = 64  # 批量大小
+        self.batch_states = []
+        self.batch_nodes = []
 
     def playout(self, board):
         node = self.root
@@ -65,7 +68,7 @@ class MCTS(object):
             action, node = node.select(self.c_puct)
             board.push(cchess.Move.from_uci(move_id2move_action[action]))
 
-        action_probs, leaf_value = self.policy(board)
+        action_probs, leaf_value = self.policy([decode_board(board)])
         end = board.is_game_over()
 
         if end and is_tie(board):
@@ -74,7 +77,6 @@ class MCTS(object):
             node.expand(action_probs)
 
         node.update_recursive(-leaf_value)
-
     def get_move_probs(self, board, temp=1e-3):
         for _ in range(self.n_playout):
             board_copy = board.copy()
@@ -91,7 +93,35 @@ class MCTS(object):
             self.root.parent = None
         else:
             self.root = Node(None, 1.0)
+    def batch_playout(self, board):
+        """用于批量推理"""
+        node = self.root
+        while not node.is_leaf():
+            action, node = node.select(self.c_puct)
+            board.push(cchess.Move.from_uci(move_id2move_action[action]))
 
+        # 缓存状态和对应节点
+        state = decode_board(board)
+        self.batch_states.append(state)
+        self.batch_nodes.append(node)
+
+        if len(self.batch_states) >= self.batch_size:
+            self.process_batch()
+
+    def process_batch(self):
+        """执行批量推理"""
+        if not self.batch_states:
+            return
+
+        states_batch = np.array(self.batch_states)
+        act_probs_list, value_list = self.policy(states_batch)
+
+        for node, act_probs, value in zip(self.batch_nodes, act_probs_list, value_list):
+            node.expand(list(enumerate(act_probs)))
+            node.update_recursive(-value)
+
+        self.batch_states.clear()
+        self.batch_nodes.clear()
 
 class MCTS_AI(object):
     """

@@ -11,7 +11,7 @@ from collections import deque
 from net import PolicyValueNet
 from game import Game
 from parameters import C_PUCT, PLAYOUT, BUFFER_SIZE, DATA_BUFFER_PATH, MODEL_PATH
-from tools import move_id2move_action, move_action2move_id, flip
+from tools import move_id2move_action, move_action2move_id, flip, decode_board
 from multiprocessing import Queue, Lock
 
 
@@ -33,6 +33,8 @@ class CollectPipeline:
         # 启动日志处理线程
         self.log_thread = None
         self.running = True
+        # 启动日志处理线程
+        self.start_log_thread()
 
         try:
             self.policy_value_net = PolicyValueNet(model_file=MODEL_PATH)
@@ -41,6 +43,17 @@ class CollectPipeline:
             self.policy_value_net = PolicyValueNet()
             self.log(f"已加载初始模型")
 
+        # 包装成支持批量推理的 policy_value_fn
+        def batch_policy_value_fn(board):
+            state = decode_board(board)
+            act_probs, value = self.policy_value_net.batch_policy_value([state])
+            legal_actions = [
+                move_action2move_id[cchess.Move.uci(move)]
+                for move in list(board.legal_moves)
+            ]
+            return zip(legal_actions, act_probs[0]), value[0][0]
+
+        self.batch_policy_value_fn = batch_policy_value_fn
         self.load_checkpoint()
 
         self.log_dir = "game_logs"
@@ -110,11 +123,12 @@ class CollectPipeline:
                 start_time = time.time()
 
                 winner, play_data = self.game.start_self_play(
-                    self.policy_value_net,
+                    self.batch_policy_value_fn,
                     is_shown=is_shown and (i % 10 == 0),
                     pid=self.pid,
-                    board=board  # 将board作为参数传递
+                    board=board
                 )
+
 
                 play_data = list(play_data)
                 self.episode_len = len(play_data)
