@@ -3,6 +3,9 @@ import cchess.svg
 import time
 import numpy as np
 from IPython.display import display, SVG
+
+from mcts import MCTS_AI
+from parameters import PLAYOUT, C_PUCT
 from tools import decode_board, move_id2move_action, is_tie
 from frontend import get_chess_window, create_window_visualization
 
@@ -17,7 +20,15 @@ class Game(object):
         self.board = board
         self.port = port
         self.chess_window = create_window_visualization(port=self.port)
+        # 动态 playout 参数
+        self.c_puct_schedule = {
+            (0, 30): (PLAYOUT-400 if PLAYOUT > 500 else 200,C_PUCT if C_PUCT > 0 else 3),     # 开局阶段更注重探索
+            (30, 80): (PLAYOUT-200 if PLAYOUT > 400 else 400,C_PUCT-1 if C_PUCT > 1 else 2),    # 中局平衡
+            (80, float('inf')): (PLAYOUT if PLAYOUT > 600 else 800,C_PUCT-2 if C_PUCT > 2 else 1)  # 残局更注重利用
+        }
 
+    def get_last_move(board):
+        return board.peek() if board.move_stack else None
     # 可视化棋盘
     def graphic(self, board):
         """print(
@@ -110,9 +121,21 @@ class Game(object):
                     if is_shown:
                         print(f"[{time.strftime('%H:%M:%S')}] 游戏结束. 平局")
                 return winner
-
+    def get_c_puct_by_step(self, step):
+        for (low, high), (n_playout,c_puct) in self.c_puct_schedule.items():
+            if low <= step < high:
+                return n_playout,c_puct
+    def reset_mcts(self, policy_value_net,n_playout=None, c_puct=None):
+        n_playout = n_playout or PLAYOUT
+        c_puct = c_puct or C_PUCT
+        return MCTS_AI(
+            policy_value_net.policy_value_fn,
+            c_puct=c_puct,
+            n_playout=n_playout,
+            is_selfplay=True
+        )
     # 使用蒙特卡洛树搜索开始自我对弈，存储游戏状态（状态，蒙特卡洛落子概率，胜负手）三元组用于神经网络训练
-    def start_self_play(self, player, is_shown=False, temp=1e-3):
+    def start_self_play(self, policy_value_net, is_shown=False, temp=1e-3,pid=None):
         """
         开始自我对弈，用于收集训练数据
 
@@ -136,15 +159,17 @@ class Game(object):
 
         while True:
             move_count += 1
+            n_playout,c_puct = self.get_c_puct_by_step(move_count)
+            player = self.reset_mcts(policy_value_net,n_playout,c_puct)
 
             # 每20步输出一次耗时
-            if move_count % 20 == 0:
+            if move_count % 20 == 0 or move_count == 1:
                 start_time = time.time()
                 move, move_probs = player.get_action(
                     self.board, temp=temp, return_prob=True
                 )
                 print(
-                    f"[{time.strftime('%H:%M:%S')}] 第{move_count}步耗时: {time.time() - start_time:.2f}秒"
+                    f"[{time.strftime('%H:%M:%S')}][PID={self.pid}] 第{move_count}步耗时: {time.time() - start_time:.2f}秒"
                 )
             else:
                 move, move_probs = player.get_action(
