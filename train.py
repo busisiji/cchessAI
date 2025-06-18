@@ -143,6 +143,18 @@ class TrainPipeline:
                 time.sleep(UPDATE_INTERVAL)  # 每10s更新一次模型
 
                 if (i + 1) % self.check_freq == 0:
+                    # win_ratio = self.policy_evaluate()
+                    # print("current self-play batch: {},win_ratio: {}".format(i + 1, win_ratio))
+                    # self.policy_value_net.save_model('./current_policy.model')
+                    # if win_ratio > self.best_win_ratio:
+                    #     print(f"[{time.strftime('%H:%M:%S')}] New best policy!!!!!!!!")
+                    #     self.best_win_ratio = win_ratio
+                    #     # update the best_policy
+                    #     self.policy_value_net.save_model('./best_policy.model')
+                    #     if (self.best_win_ratio == 1.0 and
+                    #             self.pure_mcts_playout_num < 5000):
+                    #         self.pure_mcts_playout_num += 1000
+                    #         self.best_win_ratio = 0.0
                     print(
                         f"[{time.strftime('%H:%M:%S')}] current self-play batch: {i + 1}"
                     )

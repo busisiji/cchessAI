@@ -1,11 +1,14 @@
+import csv
 import pickle
+
+import numpy as np
+
 import cchess
 import time
 import os
 import copy
 import argparse
 from collections import deque
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from net import PolicyValueNet
 from mcts import MCTS_AI
 from game import Game
@@ -17,116 +20,170 @@ from tools import (
     flip,
 )
 
-# 日志打印函数，带PID标识
-def log(msg):
-    print(f"[{time.strftime('%H:%M:%S')}] [PID {os.getpid()}] {msg}")
-
-# 定义整个对弈收集数据流程
 class CollectPipeline:
-    def __init__(self, init_model=None):
+    def __init__(self, init_model=None, pid=0, port=8000):
         self.board = cchess.Board()
-        self.game = Game(self.board)
+        self.game = Game(self.board, port=port)
+        self.pid = pid if pid != 0 else os.getpid()  # 使用传入的 pid 或当前进程 pid
+
         # 对弈参数
-        self.n_playout = PLAYOUT
-        self.c_puct = C_PUCT
-        self.buffer_size = BUFFER_SIZE
+        self.temp = 1  # 温度
+        self.n_playout = 400  # 每次移动的模拟次数
+        self.c_puct = 5
+        self.buffer_size = 10000  # 经验池大小
         self.data_buffer = deque(maxlen=self.buffer_size)
         self.iters = 0
+        self.completed_games = 0  # 完整棋局计数器
+        self.move_times = []  # 所有对弈步骤的耗时记录
 
-        # 提前加载模型
+        # 加载模型
         try:
             self.policy_value_net = PolicyValueNet(model_file=MODEL_PATH)
-            log("已加载最新模型")
+            self.log("已加载最新模型")
         except Exception as e:
-            log(f"模型加载失败: {e}，使用初始模型")
             self.policy_value_net = PolicyValueNet()
+            self.log(f"已加载初始模型")
 
-        # 初始化 MCTS AI
         self.mcts_ai = MCTS_AI(
             self.policy_value_net.policy_value_fn,
-            c_puct=self.c_puct,
-            n_playout=self.n_playout,
+            c_puct=5,
+            n_playout=400,
             is_selfplay=True,
         )
 
-    def mirror_data(self, play_data):
-        """左右对称变换，扩充数据集一倍"""
-        mirror_data = []
-        for state, mcts_prob, winner in play_data:
-            mirror_data.append(zip_state_mcts_prob((state, mcts_prob, winner)))
-            state_flip = state.transpose([1, 2, 0])[:, ::-1, :].transpose([2, 0, 1])
-            mcts_prob_flip = copy.deepcopy(mcts_prob)
-            for i in range(len(mcts_prob_flip)):
-                mcts_prob_flip[i] = mcts_prob[
-                    move_action2move_id[flip(move_id2move_action[i])]
-                ]
-            mirror_data.append(zip_state_mcts_prob((state_flip, mcts_prob_flip, winner)))
-        return mirror_data
+        # 自动恢复断点
+        self.load_checkpoint()
 
-    def collect_single_game(self, is_shown=False, max_retry=3):
-        """单个进程执行一次对弈，最多重试 max_retry 次"""
-        pid = os.getpid()
-        for retry in range(max_retry):
+        # 创建日志目录
+        self.log_dir = "game_logs"
+        if not os.path.exists(self.log_dir):
+            os.makedirs(self.log_dir)
+
+    def load_checkpoint(self):
+        """尝试从磁盘加载已有的 data_buffer"""
+        if os.path.exists(DATA_BUFFER_PATH):
             try:
-                log("开始对弈")
-                winner, play_data = self.game.start_self_play(self.mcts_ai, is_shown=is_shown)
-                play_data = list(play_data)
-                play_data = self.mirror_data(play_data)
-                log(f"完成对弈，获得 {len(play_data)} 条数据")
-                return play_data
+                with open(DATA_BUFFER_PATH, "rb") as f:
+                    data = pickle.load(f)
+                    self.data_buffer = deque(data["data_buffer"], maxlen=self.buffer_size)
+                    self.completed_games = data.get("completed_games", 0)
+                    self.log(f"成功加载历史数据，已有 {len(self.data_buffer)} 条样本，完成 {self.completed_games} 局")
             except Exception as e:
-                log(f"第 {retry+1}/{max_retry} 次对弈失败: {e}")
-                time.sleep(1)
-        log("多次失败，跳过本局")
-        return []
+                self.log(f"加载断点失败：{e}")
+
+    def save_checkpoint(self):
+        """将当前数据缓冲区和计数器保存到磁盘"""
+        data = {
+            "data_buffer": list(self.data_buffer),
+            "completed_games": self.completed_games,
+        }
+        with open(DATA_BUFFER_PATH, "wb") as f:
+            pickle.dump(data, f)
 
     def collect_data(self, n_games=1, is_shown=False):
-        start_time = time.time()
-        log(f"开始并行采集 {n_games} 局数据")
+        for i in range(n_games):
+            try:
+                start_time = time.time()
+                winner, play_data = self.game.start_self_play(self.mcts_ai, is_shown=is_shown)
+                play_data = list(play_data)
+                self.episode_len = len(play_data)
 
-        results = []
-        with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
-            future_tasks = [executor.submit(self.collect_single_game, is_shown) for _ in range(n_games)]
-            for future in as_completed(future_tasks):
-                try:
-                    play_data = future.result()
-                    results.append(play_data)
-                except Exception as e:
-                    log(f"某个对弈任务异常完成: {e}")
+                # 只有当棋局正常结束时才保存
+                if winner is not None and len(play_data) > 0:
+                    move_times = []
+                    moves = []
 
-        for play_data in results:
-            self.data_buffer.extend(play_data)
+                    # 开始记录每一步
+                    log_file = os.path.join(self.log_dir, f"game_{self.completed_games + 1}.csv")
+                    fieldnames = ["step", "from_pos", "to_pos", "uci", "elapsed_sec"]
 
-        self.iters += 1
-        data_dict = {"data_buffer": self.data_buffer, "iters": self.iters}
-        with open(DATA_BUFFER_PATH, "wb") as data_file:
-            pickle.dump(data_dict, data_file)
+                    with open(log_file, "w", newline="", encoding="utf-8") as csvfile:
+                        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                        writer.writeheader()
 
-        duration = round(time.time() - start_time, 2)
-        log(f"批量采集完成，共 {len(self.data_buffer)} 条数据，耗时 {duration} 秒")
-        return self.iters
+                        board = cchess.Board()
+                        prev_time = time.time()
+                        for idx, (state, mcts_prob, _) in enumerate(play_data):
+                            curr_time = time.time()
+                            elapsed = curr_time - prev_time
+                            prev_time = curr_time
+                            move_times.append(elapsed)
 
-    def run(self, n_games_per_iter=1, is_shown=False):
-        """开始收集数据"""
+                            move = board.last_move
+                            if move:
+                                ucci = move.to_ucci()
+                                from_pos = cchess.parse_ucci(ucci)[0]
+                                to_pos = cchess.parse_ucci(ucci)[1]
+                                moves.append((from_pos, to_pos))
+
+                                # 写入CSV
+                                writer.writerow({
+                                    "step": idx + 1,
+                                    "from_pos": from_pos,
+                                    "to_pos": to_pos,
+                                    "uci": ucci,
+                                    "elapsed_sec": round(elapsed, 3)
+                                })
+
+                                # 分析慢速步骤
+                                if elapsed > 2.0:
+                                    self.log(f"⚠️ 第 {idx + 1} 步耗时 {elapsed:.2f}s，可能较慢")
+
+                        self.log(f"棋局记录已保存至 {log_file}")
+
+                    # 统计本局信息
+                    total_time = time.time() - start_time
+                    num_moves = len(play_data)
+                    avg_time = np.mean(move_times)
+                    max_time = max(move_times) if move_times else 0
+
+                    # 显示总结
+                    self.log(f"\n第 {self.completed_games + 1} 局完成")
+                    self.log(f"总步数：{num_moves}")
+                    self.log(f"总耗时：{total_time:.2f} 秒")
+                    self.log(f"平均每步耗时：{avg_time:.2f} 秒")
+                    self.log(f"最大单步耗时：{max_time:.2f} 秒")
+                    self.log(f"胜负方：{'红方' if winner == 1 else '黑方' if winner == -1 else '和棋'}")
+                    self.log(f"前三步移动坐标：{moves[:3]}\n")
+
+                    # 数据处理与保存
+                    play_data = self.mirror_data(play_data)
+                    self.data_buffer.extend(play_data)
+                    self.completed_games += 1
+                    self.save_checkpoint()  # 实时保存
+
+                else:
+                    self.log("检测到非完整棋局，已跳过")
+            except KeyboardInterrupt:
+                self.log("棋局被中断，未保存该局数据")
+                continue
+
+        return self.completed_games
+
+    def run(self, queue=None, is_shown=False):
         try:
             while True:
-                start_total = time.time()
-                iters = self.collect_data(n_games=n_games_per_iter, is_shown=is_shown)
-                total_duration = round(time.time() - start_total, 2)
-                print(
-                    f"[{time.strftime('%H:%M:%S')}] batch i: {iters}, "
-                    f"总耗时 {total_duration}s, 当前共收集了 {len(self.data_buffer)} 条数据"
-                )
+                iters = self.collect_data(is_shown=is_shown)
+                data_to_save = list(self.data_buffer)
+                if queue:
+                    queue.put(data_to_save)  # 异步写入队列
+                self.log(f"batch i: {iters}, 总完整局数: {self.completed_games}")
         except KeyboardInterrupt:
-            print(f"\n\r[{time.strftime('%H:%M:%S')}] 用户中断")
+            self.log("程序退出，最终完整局数: %d" % self.completed_games)
+
+    # 新增：封装日志函数，支持 PID 显示
+    def log(self, message):
+        print(f"[{time.strftime('%H:%M:%S')}][PID={self.pid}] {message}")
+
 
 
 if __name__ == "__main__":
+    # 添加命令行参数解析
     parser = argparse.ArgumentParser(description="收集中国象棋自对弈数据")
-    parser.add_argument("--show", action="store_true", default=False, help="是否显示棋盘过程")
-    parser.add_argument("--games", type=int, default=int(os.cpu_count() * 0.75), help="每次并行运行的对局数（默认：CPU核心数）")
+    parser.add_argument(
+        "--show", action="store_true", default=False, help="是否显示棋盘对弈过程"
+    )
     args = parser.parse_args()
-
+    # 创建数据收集管道实例
     collecting_pipeline = CollectPipeline(init_model="current_policy.pkl")
-    n_games = args.games if args.games > 0 else os.cpu_count()
-    collecting_pipeline.run(n_games_per_iter=n_games, is_shown=args.show)
+    collecting_pipeline.run(is_shown=args.show)

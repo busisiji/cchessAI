@@ -4,7 +4,7 @@ import time
 import numpy as np
 from IPython.display import display, SVG
 from tools import decode_board, move_id2move_action, is_tie
-from frontend import get_chess_window
+from frontend import get_chess_window, create_window_visualization
 
 
 class Game(object):
@@ -13,8 +13,9 @@ class Game(object):
     收集对局过程中的数据，以及进行棋盘的展示
     """
 
-    def __init__(self, board):
+    def __init__(self, board, port=8000):
         self.board = board
+        self.port = port
 
     # 可视化棋盘
     def graphic(self, board):
@@ -42,7 +43,8 @@ class Game(object):
 
         # 尝试在窗口中显示
         try:
-            window = get_chess_window()
+            chess_window = create_window_visualization(port=self.port)
+            window = chess_window()
             if window:
                 window.update_board(svg, status_text)
                 # 给窗口一点时间更新
