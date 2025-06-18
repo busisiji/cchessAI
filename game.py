@@ -157,10 +157,14 @@ class Game(object):
         # 开始自我对弈
         move_count = 0
 
+        # 初始化玩家
+        player = self.reset_mcts(policy_value_net, PLAYOUT, C_PUCT)
         while True:
             move_count += 1
             n_playout,c_puct = self.get_c_puct_by_step(move_count)
-            player = self.reset_mcts(policy_value_net,n_playout,c_puct)
+            if n_playout != player.mcts.n_playout or abs(c_puct - player.mcts.c_puct) > 1e-6:
+                player.mcts.n_playout = n_playout
+                player.mcts.c_puct = c_puct
 
             # 每20步输出一次耗时
             if move_count % 20 == 0 or move_count == 1:
@@ -169,7 +173,7 @@ class Game(object):
                     self.board, temp=temp, return_prob=True
                 )
                 print(
-                    f"[{time.strftime('%H:%M:%S')}][PID={self.pid}] 第{move_count}步耗时: {time.time() - start_time:.2f}秒"
+                    f"[{time.strftime('%H:%M:%S')}][PID={pid}] 第{move_count}步耗时: {time.time() - start_time:.2f}秒"
                 )
             else:
                 move, move_probs = player.get_action(
