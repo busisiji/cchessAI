@@ -16,6 +16,7 @@ class Game(object):
     def __init__(self, board, port=8000):
         self.board = board
         self.port = port
+        self.chess_window = create_window_visualization(port=self.port)
 
     # 可视化棋盘
     def graphic(self, board):
@@ -43,8 +44,7 @@ class Game(object):
 
         # 尝试在窗口中显示
         try:
-            chess_window = create_window_visualization(port=self.port)
-            window = chess_window()
+            window = self.chess_window()
             if window:
                 window.update_board(svg, status_text)
                 # 给窗口一点时间更新
