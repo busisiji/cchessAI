@@ -39,7 +39,8 @@ def worker(args):
             shared_queue.put(list(pipeline.data_buffer))
     except KeyboardInterrupt:
         log_pipe.send(f"[{time.strftime('%H:%M:%S')}][PID={pid}] 子进程中止")
-
+    finally:
+        pipeline.stop_log_thread()
 
 def generate_fingerprint(state):
     """生成状态指纹用于去重"""
@@ -60,10 +61,20 @@ def deduplicate(data_list, seen_hashes):
 def log_writer(conn):
     """单独进程处理日志写入"""
     while True:
-        message = conn.recv()
-        if message == "STOP":
+        try:
+            message = conn.recv()
+            if message == "STOP":
+                break
+            print(message)
+        except EOFError:
             break
-        print(message)
+        except KeyboardInterrupt:
+            # 捕获并安全退出
+            print("[LOG WRITER] 收到中断信号，日志进程即将退出")
+            break
+        except Exception as e:
+            print(f"[LOG WRITER] 错误: {e}")
+            break
 
 
 def writer_process(shared_queue, output_path, buffer_size, seen_hashes):
@@ -105,6 +116,10 @@ def main():
     parser.add_argument("--show", action="store_true", default=False, help="是否显示棋盘对弈过程")
     parser.add_argument("--use-gpu", action="store_true", default=True, help="是否使用 GPU 推理")
     args = parser.parse_args()
+
+    # # 调试
+    # args.workers = 1
+    # args.show = True
 
     manager = Manager()
     shared_queue = manager.Queue()

@@ -133,20 +133,6 @@ class PolicyValueNet(object):
         act_probs = np.exp(log_act_probs.detach().numpy())
         return act_probs, value.detach().numpy()
 
-    # 批量推理
-    def batch_policy_value(self, state_batches):
-        self.policy_value_net.eval()
-        results = []
-        with torch.no_grad():
-            state_tensor = torch.tensor(np.array(state_batches)).to(self.device)
-            log_act_probs, value = self.policy_value_net(state_tensor)
-            act_probs = np.exp(log_act_probs.cpu().numpy())
-            value = value.cpu().numpy()
-            for i in range(len(state_batches)):
-                results.append((act_probs[i], value[i, 0]))
-        return results
-
-
     # 输入棋盘，返回每个合法动作的（动作，概率）元组列表，以及棋盘状态的分数
     def policy_value_fn(self, board):
         self.policy_value_net.eval()
