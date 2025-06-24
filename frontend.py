@@ -355,6 +355,11 @@ def create_window_visualization(host="127.0.0.1", port=8000):
                 status_text = status_text_
                 last_update_time = time.time()  # 更新时间戳
 
+            def update_status(self, status_text_):
+                """仅更新状态文本"""
+                nonlocal status_text, last_update_time
+                status_text = status_text_
+                last_update_time = time.time()  # 触发更新
             def stop(self):
                 """停止HTTP服务器"""
                 if self.server:

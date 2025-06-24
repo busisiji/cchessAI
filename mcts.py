@@ -1,3 +1,5 @@
+import time
+
 import numpy as np
 import cchess
 from parameters import C_PUCT, EPS, ALPHA
@@ -95,36 +97,38 @@ class MCTS(object):
         self.policy = policy_value_fn
         self.c_puct = c_puct
         self.n_playout = n_playout
-
+        self.cache = {}  # 新增缓存字典
     def playout(self, board):
-        """
-        从根节点开始进行一次模拟, 直到到达叶子节点, 并返回叶子节点的评估值
-        """
         node = self.root
-        while 1:
+
+        while True:
             if node.is_leaf():
                 break
-            # Greedily select next move.
             action, node = node.select(self.c_puct)
             board.push(cchess.Move.from_uci(move_id2move_action[action]))
 
-        # 使用网络评估叶子节点，网络输出（动作，概率）元组p的列表以及当前玩家视角的得分[-1, 1]
-        action_probs, leaf_value = self.policy(board)
-        # 查看游戏是否结束
-        end = board.is_game_over()
-        if not end and not is_tie(board):
-            # 如果游戏没有结束，且不是平局，则展开子节点
-            node.expand(action_probs)
-        elif end and is_tie(board):
-            # 如果游戏结束且平局，则将叶子节点的值设置为0
-            leaf_value = 0.0
+        fen = board.fen()
+        if fen in self.cache:
+            leaf_value = self.cache[fen]
+            # 命中缓存时仍然需要重新获取 action_probs
+            action_probs, _ = self.policy(board)  # 👈 添加这一行
         else:
-            # 如果游戏结束且不是平局，则将叶子节点的值设置为1或-1
+            action_probs, leaf_value = self.policy(board)
+            self.cache[fen] = leaf_value
+
+        if not board.is_game_over() and not is_tie(board):
+            node.expand(action_probs)
+
+        elif board.is_game_over():
             winner = cchess.RED if board.outcome().winner else cchess.BLACK
             leaf_value = 1.0 if winner == board.turn else -1.0
-        # 在本次遍历中更新节点的值和访问次数
-        # 必须添加符号，因为两个玩家共用一个搜索树
+        else:
+            leaf_value = 0.0
+
         node.update_recursive(-leaf_value)
+
+        node.update_recursive(-leaf_value)
+
 
     def get_move_probs(self, board, temp=1e-3):
         """
@@ -189,7 +193,19 @@ class MCTS_AI(object):
         # 动作空间大小
         move_probs = np.zeros(2086)
 
+        # step = len(board.move_stack)
+        # # 动态调整温度
+        # if step < 20:
+        #     temp = 1.0  # 前20步高探索
+        # elif step < 50:
+        #     temp = 0.5  # 中期逐步收敛
+        # else:
+        #     temp = 1e-3  # 后期确定性选择
+
+        print(f"[AI] 开始思考第 {len(board.move_stack)} 步...")
+        start_time = time.time()
         acts, probs = self.mcts.get_move_probs(board, temp)
+        print(f"[AI] 思考结束，耗时 {time.time() - start_time:.2f} 秒")
         move_probs[list(acts)] = probs
         if self.is_selfplay:
             # 添加Dirichlet Noise进行探索（自我对弈需要）

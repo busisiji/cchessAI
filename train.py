@@ -1,3 +1,6 @@
+# 训练模型
+import os
+
 import cchess
 import random
 import pickle
@@ -7,6 +10,20 @@ from game import Game
 from collections import deque
 from net import PolicyValueNet
 from tools import recovery_state_mcts_prob
+
+# 关键参数
+# MODEL_PATH = models/current_policy.pkl # 模型路径
+# GAME_BATCH_NUM = 30000 #训练轮数
+# CHECK_FREQ=300  # 保存模型的频率
+
+# 持续强化学习参数
+# IS_CRL # 是否持续强化学习 （边下棋边训练）
+# UPDATE_INTERVAL = 10 # 持续强化学习时每隔多少秒检查并更新模型
+
+# 其他参数
+# BUFFER_SIZE = 100000  # 经验池大小
+# KL_TARG = 0.02 kl散度控制
+# BATCH_SIZE = 1024 # 批次大小
 
 # from torch.utils.data import DataLoader, Dataset
 from parameters import (
@@ -38,11 +55,16 @@ class TrainPipeline:
         self.epochs = EPOCHS  # 每次训练的轮数
         self.kl_targ = KL_TARG  # kl散度控制
         self.check_freq = CHECK_FREQ  # 保存模型的频率
-        self.game_batch_num = GAME_BATCH_NUM  # 每次训练的游戏数量
+        self.game_batch_num = GAME_BATCH_NUM  # 训练次数
+        self.names = [] # 此次训练的模型
+        self.train_num = 0
         # self.best_win_ratio = 0.0
         # self.pure_mcts_playout_num = 500
         self.buffer_size = BUFFER_SIZE  # 经验池大小
         self.data_buffer = deque(maxlen=self.buffer_size)
+
+        os.makedirs("models", exist_ok=True)
+
         if init_model:
             try:
                 self.policy_value_net = PolicyValueNet(model_file=init_model)
@@ -54,8 +76,20 @@ class TrainPipeline:
         else:
             print(f"[{time.strftime('%H:%M:%S')}] 从零开始训练")
             self.policy_value_net = PolicyValueNet()
+    def cleanup_models(self):
+        """保留 self.names 中最后一个模型，其余删除"""
+        if len(self.names) <= 1:
+            return
 
-    def policy_update(self):
+        for model_path in self.names[:-1]:
+            if os.path.exists(model_path):
+                try:
+                    os.remove(model_path)
+                    print(f"[{time.strftime('%H:%M:%S')}] 已删除模型: {model_path}")
+                except Exception as e:
+                    print(f"[{time.strftime('%H:%M:%S')}] 删除失败: {model_path}, 错误: {e}")
+
+    def policy_update(self,i=None):
         """更新策略价值网络"""
         mini_batch = random.sample(self.data_buffer, self.batch_size)
         # print(mini_batch[0][1],mini_batch[1][1])
@@ -103,10 +137,11 @@ class TrainPipeline:
         explained_var_new = 1 - np.var(
             np.array(winner_batch) - new_v.flatten()
         ) / np.var(np.array(winner_batch))
-
+        self.train_num += 1
         print(
             (
                 f"[{time.strftime('%H:%M:%S')}] kl:{kl:.5f},"
+                f"第{self.train_num}轮"
                 f"lr_multiplier:{self.lr_multiplier:.3f},"
                 f"loss:{loss:.3f},"
                 f"entropy:{entropy:.3f},"
@@ -119,26 +154,27 @@ class TrainPipeline:
     def run(self):
         """开始训练"""
         try:
+            while True:
+                try:
+                    with open(DATA_BUFFER_PATH, "rb") as data_dict:
+                        data_file = pickle.load(data_dict)
+                        self.data_buffer = data_file["data_buffer"]
+                        self.iters = data_file["iters"]
+                        del data_file
+                    print(
+                        f"[{time.strftime('%H:%M:%S')}] 已载入数据，缓冲区大小: {len(self.data_buffer)}, batch_size: {self.batch_size}"
+                    )
+                    break
+                except:
+                    time.sleep(10)
             for i in range(self.game_batch_num):
-                while True:
-                    try:
-                        with open(DATA_BUFFER_PATH, "rb") as data_dict:
-                            data_file = pickle.load(data_dict)
-                            self.data_buffer = data_file["data_buffer"]
-                            self.iters = data_file["iters"]
-                            del data_file
-                        print(
-                            f"[{time.strftime('%H:%M:%S')}] 已载入数据，缓冲区大小: {len(self.data_buffer)}, batch_size: {self.batch_size}"
-                        )
-                        break
-                    except:
-                        time.sleep(10)
-
                 print(f"[{time.strftime('%H:%M:%S')}] step i {self.iters}: ")
                 if len(self.data_buffer) > self.batch_size:
-                    loss, entropy = self.policy_update()
-                    # 保存模型
+                    loss, entropy = self.policy_update(i)
+                    # # 保存模型
                     self.policy_value_net.save_model(MODEL_PATH)
+                    # 清理此批次之外的模型
+                    self.cleanup_models()
 
                 time.sleep(UPDATE_INTERVAL)  # 每10s更新一次模型
 
@@ -158,10 +194,12 @@ class TrainPipeline:
                     print(
                         f"[{time.strftime('%H:%M:%S')}] current self-play batch: {i + 1}"
                     )
-                    self.policy_value_net.save_model(
-                        "models/current_policy_batch{}.pkl".format(i + 1)
-                    )
+                    name = f"models/current_policy_batch{i + 1}_{time.strftime('%H:%M:%S')}.pkl"
+                    self.policy_value_net.save_model(name)
+                    self.names.append(name)
         except KeyboardInterrupt:
+            # 清理最后一个之外的模型
+            # self.cleanup_models()
             print(f"\n\r[{time.strftime('%H:%M:%S')}] quit")
 
 

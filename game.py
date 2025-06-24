@@ -3,11 +3,8 @@ import cchess.svg
 import time
 import numpy as np
 from IPython.display import display, SVG
-
-from mcts import MCTS_AI
-from parameters import PLAYOUT, C_PUCT
 from tools import decode_board, move_id2move_action, is_tie
-from frontend import get_chess_window, create_window_visualization
+from frontend import get_chess_window
 
 
 class Game(object):
@@ -16,18 +13,8 @@ class Game(object):
     收集对局过程中的数据，以及进行棋盘的展示
     """
 
-    def __init__(self, board, port=8000):
+    def __init__(self, board):
         self.board = board
-        self.port = port
-        self.chess_window = create_window_visualization(port=self.port)
-
-        # 动态 playout 参数
-        self.c_puct_schedule = [
-            ((0, 30), (PLAYOUT-400 if PLAYOUT > 500 else 200, C_PUCT if C_PUCT > 0 else 3)),
-            ((30, 60), (PLAYOUT-200 if PLAYOUT > 400 else 400, C_PUCT-1 if C_PUCT > 1 else 2)),
-            ((60, 100), (PLAYOUT if PLAYOUT >= 800 else 800, C_PUCT-2 if C_PUCT > 2 else 1)),
-            ((100, float('inf')), (PLAYOUT if PLAYOUT >= 1200 else 1200, C_PUCT  if C_PUCT > 0 else 3)),
-        ]
 
     # 可视化棋盘
     def graphic(self, board):
@@ -45,7 +32,7 @@ class Game(object):
             coordinates=True,
             axes_type=0,
             checkers=board.checkers(),
-            lastmove=board.peek() if board.peek() else None,
+            lastmove=board.peek() if len(board.move_stack) > 0 else None,
             orientation=cchess.RED,
         )
         # 获取当前玩家
@@ -55,7 +42,7 @@ class Game(object):
 
         # 尝试在窗口中显示
         try:
-            window = self.chess_window()
+            window = get_chess_window()
             if window:
                 window.update_board(svg, status_text)
                 # 给窗口一点时间更新
@@ -96,11 +83,16 @@ class Game(object):
 
         # 开始游戏循环
         while True:
+            current_turn = "红方" if self.board.turn == cchess.RED else "黑方"
+            print(f"[{time.strftime('%H:%M:%S')}] 当前轮到: {current_turn}")
+
             player_in_turn = players[self.board.turn]
+
             move = player_in_turn.get_action(self.board)
+            print(f"[{time.strftime('%H:%M:%S')}] 动作已获取: {move}")
 
             # 执行移动
-            self.board.push(move)
+            self.board.push(cchess.Move.from_uci(move_id2move_action[move]))
 
             # 更新显示
             if is_shown:
@@ -113,31 +105,34 @@ class Game(object):
                     winner = outcome.winner
                     if is_shown:
                         winner_name = "RED" if winner == cchess.RED else "BLACK"
+                        status_text = f"游戏结束，赢家是：{winner_name}"
                         print(
-                            f"[{time.strftime('%H:%M:%S')}] 游戏结束. 赢家是: {winner_name}"
+                            f"[{time.strftime('%H:%M:%S')}] {status_text}"
                         )
+                        try:
+                            window = get_chess_window()
+                            if window:
+                                window.update_status(status_text)
+                                time.sleep(0.5)  # 给窗口一点时间更新
+                        except ImportError:
+                            print(status_text)
                 else:
                     winner = -1
                     if is_shown:
-                        print(f"[{time.strftime('%H:%M:%S')}] 游戏结束. 平局")
+                        status_text = "游戏结束. 平局"
+                        print(f"[{time.strftime('%H:%M:%S')}] {status_text}")
+                        try:
+                            window = get_chess_window()
+                            if window:
+                                window.update_status(status_text)
+                                time.sleep(0.5)  # 给窗口一点时间更新
+                        except ImportError:
+                            print(status_text)
+
                 return winner
 
-    def get_c_puct_by_step(self, step):
-        """根据当前步数获取对应的搜索参数"""
-        return next(((n_playout, c_puct) for (low, high), (n_playout, c_puct) in self.c_puct_schedule if low <= step < high), (PLAYOUT, C_PUCT))
-
-    def reset_mcts(self, policy_value_net, n_playout=None, c_puct=None):
-        """重置MCTS"""
-        n_playout = n_playout or PLAYOUT
-        c_puct = c_puct or C_PUCT
-        return MCTS_AI(
-            policy_value_net.policy_value_fn,
-            c_puct=c_puct,
-            n_playout=n_playout,
-            is_selfplay=True
-        )
     # 使用蒙特卡洛树搜索开始自我对弈，存储游戏状态（状态，蒙特卡洛落子概率，胜负手）三元组用于神经网络训练
-    def start_self_play(self, policy_value_net, is_shown=False, temp=1e-3, pid=None, board=None):
+    def start_self_play(self, player, is_shown=False, temp=1e-3):
         """
         开始自我对弈，用于收集训练数据
 
@@ -158,26 +153,18 @@ class Game(object):
 
         # 开始自我对弈
         move_count = 0
-        # 初始化玩家
-        n_playout, c_puct = self.get_c_puct_by_step(move_count)
-        player = self.reset_mcts(policy_value_net, n_playout, c_puct)
 
         while True:
             move_count += 1
-            n_playout, c_puct = self.get_c_puct_by_step(move_count)
-            # 只在必要时更新参数
-            if n_playout != player.mcts.n_playout or abs(c_puct - player.mcts.c_puct) > 1e-6:
-                player.mcts.n_playout = n_playout
-                player.mcts.c_puct = c_puct
 
             # 每20步输出一次耗时
-            if move_count % 20 == 0 or move_count == 1:
+            if move_count % 20 == 0:
                 start_time = time.time()
                 move, move_probs = player.get_action(
                     self.board, temp=temp, return_prob=True
                 )
                 print(
-                    f"[{time.strftime('%H:%M:%S')}][PID={pid}] 第{move_count}步耗时: {time.time() - start_time:.2f}秒"
+                    f"[{time.strftime('%H:%M:%S')}] 第{move_count}步耗时: {time.time() - start_time:.2f}秒"
                 )
             else:
                 move, move_probs = player.get_action(
@@ -214,13 +201,13 @@ class Game(object):
                     if is_shown:
                         winner_name = "RED" if winner == cchess.RED else "BLACK"
                         print(
-                            f"[{time.strftime('%H:%M:%S')}][PID={pid}] 游戏结束. 赢家是: {winner_name}"
+                            f"[{time.strftime('%H:%M:%S')}] 游戏结束. 赢家是: {winner_name}"
                         )
                 else:
                     # 平局情况
                     winner = -1
                     if is_shown:
-                        print(f"[{time.strftime('%H:%M:%S')}][PID={pid}] 游戏结束. 平局")
+                        print(f"[{time.strftime('%H:%M:%S')}] 游戏结束. 平局")
 
                 # 重置蒙特卡洛根节点
                 player.reset_player()
