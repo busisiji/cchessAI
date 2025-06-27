@@ -46,7 +46,7 @@ MODEL_PATH = "current_policy.pkl"
 # 训练数据容器地址
 DATA_PATH = "data"
 # 训练数据容器地址
-DATA_BUFFER_PATH = os.path.join(DATA_PATH, "data_buffer.pkl")
+DATA_BUFFER_PATH = "data/data_buffer.pkl"
 DATA_BUFFER_PATH_2 = os.path.join("data_buffer.pkl")
 # 保存数据的频率
 DATA_CHECK_FREQ = 1
@@ -61,4 +61,4 @@ KL_TARG = 0.02
 # 训练次数
 GAME_BATCH_NUM = 3000
 # 保存模型的频率
-CHECK_FREQ = 100
+CHECK_FREQ = 10

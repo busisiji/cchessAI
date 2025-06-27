@@ -1,5 +1,7 @@
 # 训练模型
 import os
+import re
+from concurrent.futures import ThreadPoolExecutor
 
 import cchess
 import random
@@ -44,6 +46,7 @@ from parameters import (
 class TrainPipeline:
     def __init__(self, init_model=None):
         # 训练参数
+        self.init_model = init_model
         self.board = cchess.Board()
         self.game = Game(self.board)
         self.n_playout = PLAYOUT  # 每次移动的模拟次数
@@ -58,6 +61,7 @@ class TrainPipeline:
         self.game_batch_num = GAME_BATCH_NUM  # 训练次数
         self.names = [] # 此次训练的模型
         self.train_num = 0
+        self.best_win_ratio = 0.0 # 最佳胜率
         # self.best_win_ratio = 0.0
         # self.pure_mcts_playout_num = 500
         self.buffer_size = BUFFER_SIZE  # 经验池大小
@@ -67,8 +71,9 @@ class TrainPipeline:
 
         if init_model:
             try:
-                self.policy_value_net = PolicyValueNet(model_file=init_model)
-                print(f"[{time.strftime('%H:%M:%S')}] 已加载上次最终模型")
+                self.policy_value_net = PolicyValueNet(model_file=self.init_model)
+                self.train_num = self.extract_batch_number(self.init_model)
+                print(f"[{time.strftime('%H:%M:%S')}] 已加载上次最终模型 {self.train_num}批次训练")
             except:
                 # 从零开始训练
                 print(f"[{time.strftime('%H:%M:%S')}] 模型路径不存在，从零开始训练")
@@ -76,18 +81,66 @@ class TrainPipeline:
         else:
             print(f"[{time.strftime('%H:%M:%S')}] 从零开始训练")
             self.policy_value_net = PolicyValueNet()
+    def extract_batch_number(self,model_path):
+        """
+        从模型路径中提取 batch 轮数。
+
+        参数:
+            model_path (str): 模型文件路径，如 "models/current_policy_batch456_2024-04-05_10-20-30.pkl"
+
+        返回:
+            int: 提取出的轮数，如 456；若未找到则返回 None
+        """
+        filename = os.path.basename(model_path)
+        match = re.search(r"batch(\d+)_", filename)
+        if match:
+            return int(match.group(1))
+        else:
+            return 0
+
     def cleanup_models(self):
-        """保留 self.names 中最后一个模型，其余删除"""
-        if len(self.names) <= 1:
+        """保留 self.names 中最后十个模型，其余删除"""
+        if len(self.names) <= 3:
             return
 
-        for model_path in self.names[:-1]:
+        for model_path in self.names[:-3]:
             if os.path.exists(model_path):
                 try:
                     os.remove(model_path)
                     print(f"[{time.strftime('%H:%M:%S')}] 已删除模型: {model_path}")
                 except Exception as e:
                     print(f"[{time.strftime('%H:%M:%S')}] 删除失败: {model_path}, 错误: {e}")
+
+    def policy_evaluate(self, num_games=5):
+        """
+        使用当前策略网络与纯MCTS玩家进行对局，计算胜率 win_ratio
+        num_games: 每次评估的对局数
+        return: 胜率 win_ratio
+        """
+        from mcts import MCTS_AI
+        from game import Game
+
+        # 初始化MCTS AI玩家
+        current_player = MCTS_AI(policy_value_fn=self.policy_value_net.policy_value_fn, n_playout=400)
+        opponent_player = MCTS_AI(policy_value_fn=self.policy_value_net.policy_value_fn, n_playout=200)
+
+        # 单个对局函数
+        def play_game(game):
+            winner, _ = game.start_play(current_player, opponent_player, is_shown=False)
+            return 1 if winner == cchess.RED else 0
+
+        win_count = 0
+        with ThreadPoolExecutor(max_workers=num_games) as executor:
+            futures = []
+            for _ in range(num_games):
+                game_copy = Game(cchess.Board())  # 创建新的棋盘实例避免冲突
+                futures.append(executor.submit(play_game, game_copy))
+
+            for future in futures:
+                win_count += future.result()
+
+        win_ratio = win_count / num_games
+        return win_ratio
 
     def policy_update(self,i=None):
         """更新策略价值网络"""
@@ -169,18 +222,22 @@ class TrainPipeline:
                     time.sleep(10)
             for i in range(self.game_batch_num):
                 print(f"[{time.strftime('%H:%M:%S')}] step i {self.iters}: ")
+                win_ratio = 0.0
                 if len(self.data_buffer) > self.batch_size:
-                    loss, entropy = self.policy_update(i)
-                    # # 保存模型
-                    self.policy_value_net.save_model(MODEL_PATH)
-                    # 清理此批次之外的模型
-                    self.cleanup_models()
+                    try:
+                        loss, entropy= self.policy_update(i)
+                        print("current self-play batch: {},win_ratio: {}".format(i + 1, win_ratio))
+                        # # 保存模型
+                        # self.policy_value_net.save_model(MODEL_PATH)
+                        # 清理此批次之外的模型
+                        self.cleanup_models()
+                    except Exception as e:
+                        print(f"[{time.strftime('%H:%M:%S')}] 训练失败: {e}")
 
                 time.sleep(UPDATE_INTERVAL)  # 每10s更新一次模型
 
                 if (i + 1) % self.check_freq == 0:
                     # win_ratio = self.policy_evaluate()
-                    # print("current self-play batch: {},win_ratio: {}".format(i + 1, win_ratio))
                     # self.policy_value_net.save_model('./current_policy.model')
                     # if win_ratio > self.best_win_ratio:
                     #     print(f"[{time.strftime('%H:%M:%S')}] New best policy!!!!!!!!")
@@ -191,10 +248,11 @@ class TrainPipeline:
                     #             self.pure_mcts_playout_num < 5000):
                     #         self.pure_mcts_playout_num += 1000
                     #         self.best_win_ratio = 0.0
-                    print(
-                        f"[{time.strftime('%H:%M:%S')}] current self-play batch: {i + 1}"
-                    )
-                    name = f"models/current_policy_batch{i + 1}_{time.strftime('%H:%M:%S')}.pkl"
+                    # print(
+                    #     f"[{time.strftime('%H:%M:%S')}] current self-play batch: {i + 1}"
+                    # )
+                    name = f"models/current_policy_batch{self.train_num}_{time.strftime('%Y-%m-%d_%H-%M-%S')}.pkl"  # 添加日期信息
+                    os.makedirs(os.path.dirname(name), exist_ok=True)  # 确保目录存在
                     self.policy_value_net.save_model(name)
                     self.names.append(name)
         except KeyboardInterrupt:
@@ -204,5 +262,5 @@ class TrainPipeline:
 
 
 if __name__ == "__main__":
-    training_pipeline = TrainPipeline(init_model="current_policy.pkl")
+    training_pipeline = TrainPipeline(init_model="models/current_policy_batch300_2025-06-27_14-03-44.pkl")
     training_pipeline.run()

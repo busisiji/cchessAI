@@ -1,12 +1,11 @@
-# UIplay.py - 改进版，支持人机对战
+# UIplay.py - 优化版人机对弈
 
 from game import Game
 import cchess
 from mcts import MCTS_AI
-from tools import move_action2move_id, move_id2move_action  # 注意变量名是否一致
-
+from tools import move_id2move_action, move_action2move_id
 from net import PolicyValueNet
-
+import time
 
 class Human:
     """人类玩家类"""
@@ -37,16 +36,15 @@ class Human:
         self.player_idx = idx
 
 
-
 def run():
     # 加载模型
-    policy_value_net = PolicyValueNet(model_file='current_policy.pkl')
+    policy_value_net = PolicyValueNet(model_file='models/current_policy_batch300_2025-06-27_14-03-44.pkl', use_gpu=True)
 
     # 创建 MCTS 玩家
     mcts_player = MCTS_AI(
         policy_value_net.policy_value_fn,
         c_puct=5,
-        n_playout=1200,
+        n_playout=400,  # 减少模拟次数
         is_selfplay=False
     )
 
@@ -54,11 +52,11 @@ def run():
     human = Human()
 
     # 初始化棋盘和游戏
-    board = cchess.Board()  # 使用 cchess 的 Board 类
+    board = cchess.Board()
     game = Game(board)
 
-    # 开始人机对战（AI 先手）
-    game.start_play(player1=human, player0=mcts_player, is_shown=1)
+    # 开始人机对战（人类先手）
+    game.start_play(player1=human, player0=mcts_player, is_shown=True)
 
 
 if __name__ == '__main__':

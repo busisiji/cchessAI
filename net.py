@@ -160,6 +160,7 @@ class PolicyValueNet(object):
         else:
             current_state = torch.as_tensor(current_state).to(self.device)
             with autocast(str(DEVICE)):  # 半精度fp16
+                print(f"使用{str(DEVICE)}推理")
                 log_act_probs, value = self.policy_value_net(current_state)
             log_act_probs, value = log_act_probs.cpu(), value.cpu()
         # 只取出合法动作
