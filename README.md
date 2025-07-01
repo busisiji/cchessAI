@@ -54,3 +54,13 @@ python train.py
 -   [python-chinese-chess](https://github.com/windshadow233/python-chinese-chess)
 -   [AlphaZero_Gomoku](https://github.com/junxiaosong/AlphaZero_Gomoku)
 -   [aichess](https://github.com/tensorfly-gpu/aichess)
+
+7. 使用 trtexec 工具转换 ONNX 到 TRT
+/usr/src/tensorrt/bin/trtexec \
+    --onnx=models/current_policy.onnx \
+    --saveEngine=models/current_policy.trt \
+    --memPoolSize=workspace:2048 \
+    --shapes=input:1x15x10x9 \
+    --fp16 \
+    --buildOnly
+

@@ -31,10 +31,18 @@ k6+1 第6列的将向下移动1行
 
 class ChessDataLoader():
     def __init__(self):
+        self.ele_red = "B" # B
+        self.ele_blacl = 'b' # e
+        self.horse_red = 'N' # H
+        self.horse_black = 'n'  # h
+        # self.ele_red = "E"
+        # self.ele_blacl =  "e"
+        # self.horse_red =  "H"
+        # self.horse_black =  "h"
         self.piece_map = {
             'r': 'r', 'R': 'R',  # 车
-            'h': 'n', 'H': 'N',  # 马
-            'e': 'b', 'E': 'B',  # 象
+            self.horse_black : 'n', self.horse_red: 'N',  # 马
+            self.ele_blacl: 'b', self.ele_red: 'B',  # 象
             'a': 'a', 'A': 'A',  # 士
             'k': 'k', 'K': 'K',  # 将
             'c': 'c', 'C': 'C',  # 炮
@@ -81,8 +89,9 @@ class ChessDataLoader():
         Returns:
             str: UCI 格式的动作字符串（如 "h2h9"）
         """
-        same_col =  None # 相同棋子是否出现同列
+        same_col = None # 相同棋子是否出现同列
         same_col_piece = []
+        values = []
 
         piece_char = notation[0]
         if piece_char not in self.piece_map:
@@ -93,7 +102,7 @@ class ChessDataLoader():
         # 获取当前棋盘上的所有合法动作
         legal_moves = list(board.legal_moves)
 
-        # if notation == 'a5+6':
+        # if notation == 'N3-4':
         #     print("调试用")
         # 相同棋子出现同列
         if notation[1] in ['-', '+']:
@@ -113,7 +122,7 @@ class ChessDataLoader():
         else:
             from_col = int(wxf_move[0]) - 1
 
-        if '.' in wxf_move or piece_char.upper() in ['H', 'E', 'A']:
+        if '.' in wxf_move or piece_char.upper() in [self.horse_red, self.ele_red, 'A']:
             to_col = int(wxf_move[-1]) - 1
         else:
             to_col = from_col
@@ -122,7 +131,7 @@ class ChessDataLoader():
         if side == 'red':
             if not same_col:
                 from_col = self.get_red_col(from_col)
-            if '.' in wxf_move or piece_char.upper() in ['H', 'E', 'A']:
+            if '.' in wxf_move or piece_char.upper() in [self.horse_red, self.ele_red, 'A']:
                 to_col = self.get_red_col(to_col)
                 wxf_move = str(from_col) + wxf_move[1] + str(to_col)
             else:
@@ -160,7 +169,7 @@ class ChessDataLoader():
 
         # 处理进/退（如 H2+3）
         elif '+' in wxf_move or '-' in wxf_move:
-            if piece_char.upper() in ['H', 'E', 'A']: # 象 马 士 不走直线 +为移动后的位置
+            if piece_char.upper() in [self.horse_red, self.ele_red, 'A']: # 象 马 士 不走直线 +为移动后的位置
                 for move in legal_moves:
                     from_square = move.from_square
                     to_square = move.to_square
@@ -210,7 +219,7 @@ class ChessDataLoader():
                     #     print(f"[INFO] 找到进退: {from_name}{to_name}")
                     #     print("调试用")
 
-                    if from_col == from_col_sq and from_col == self.to_col_sq and self.piece_map[piece_char] == board.piece_at(from_square).symbol():
+                    if from_col == from_col_sq and to_col == self.to_col_sq and self.piece_map[piece_char] == board.piece_at(from_square).symbol():
                         if side == 'red':
                             if ('+' in wxf_move and self.to_row_sq == from_row_sq + int(wxf_move[-1]))\
                                     or ('-' in wxf_move and self.to_row_sq == from_row_sq - int(wxf_move[-1])):
@@ -231,7 +240,7 @@ class ChessDataLoader():
                 if same_col_piece[0].keys() <= same_col_piece[-1].keys():
                     values = same_col_piece[0].values()
                 else:
-                    values =  same_col_piece[-1].values()
+                    values = same_col_piece[-1].values()
             else:
                 if same_col_piece[0].keys() <= same_col_piece[-1].keys():
                     values = same_col_piece[-1].values()
@@ -382,19 +391,27 @@ class ChessDataLoader():
                 move_str = row['move']
                 side = row['side']
                 turn = row['turn']
+                if side == 'red':
+                    move_str = move_str[0].upper() + move_str[1:]
+                else:
+                    move_str = move_str[0].lower() + move_str[1:]
 
                 try:
+                    if move_str == 'n7-5':
+                        print("调试用")
+                    print(board)
+                    print(f"{game_id}第{turn}回合---{move_str}--------")
                     move_uci, move = self.notation_to_uci(move_str, side, board)
                     if move is None:
                         print(f"[警告] 无法找到合法动作: {move_uci}")
-                        continue
+                        break
                 except Exception as e:
                     print(f"[警告] 非法动作格式: {move_str}, 错误: {e}")
-                    continue
+                    break
 
                 if not board.is_legal(move):
                     print(f"[警告] 非法动作: {move_uci}")
-                    continue
+                    break
 
                 # 记录当前状态
                 current_state = decode_board(board)  # 获取当前棋盘状态

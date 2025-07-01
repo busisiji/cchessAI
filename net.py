@@ -86,14 +86,20 @@ class Net(nn.Module):
         policy = self.policy_conv(x)
         policy = self.policy_bn(policy)
         policy = self.policy_act(policy)
-        policy = torch.reshape(policy, [-1, 16 * 10 * 9])
+        # policy = torch.reshape(policy, [-1, 16 * 10 * 9])
+        batch_size = x.size(0)
+        policy = torch.reshape(policy, [batch_size, 16 * 10 * 9])
+
         policy = self.policy_fc(policy)
         policy = F.log_softmax(policy, dim=1)
         # 价值头
         value = self.value_conv(x)
         value = self.value_bn(value)
         value = self.value_act1(value)
-        value = torch.reshape(value, [-1, 8 * 10 * 9])
+        # value = torch.reshape(value, [-1, 8 * 10 * 9])
+        value = torch.reshape(value, [batch_size, 8 * 10 * 9])
+
+
         value = self.value_fc1(value)
         value = self.value_act1(value)
         value = self.value_fc2(value)
@@ -105,104 +111,70 @@ class Net(nn.Module):
 class PolicyValueNet(object):
     def __init__(self, model_file=None, use_gpu=True, device="cuda"):
         self.use_gpu = use_gpu
-        self.l2_const = 2e-3  # l2 正则化
+        self.l2_const = 2e-3
         self.device = device
-        self.policy_value_net = Net().to(self.device)
-        self.optimizer = torch.optim.Adam(
-            params=self.policy_value_net.parameters(),
-            lr=1e-3,
-            betas=(0.9, 0.999),
-            eps=1e-8,
-            weight_decay=self.l2_const,
-        )
-        # 创建CUDA流用于异步操作
         self.stream = (
             torch.cuda.Stream() if self.use_gpu and torch.cuda.is_available() else None
         )
+
+        # 初始化 TensorRT 模型
+        self.trt_model = None
+        self.onnx_session = None
+
         if model_file:
-            self.policy_value_net.load_state_dict(
-                torch.load(model_file)
-            )  # 加载模型参数
+            if model_file.endswith('.trt'):
+                # 加载 TensorRT 模型
+                from torch2trt import TRTModule
+                self.trt_model = TRTModule()
+                self.trt_model.load_state_dict(torch.load(model_file))
+                print("✅ 成功加载 TensorRT 模型")
+            elif model_file.endswith('.pkl'):
+                # 加载 PyTorch 模型（兼容旧代码）
+                self.policy_value_net = Net().to(self.device)
+                self.policy_value_net.load_state_dict(torch.load(model_file))
+                print("✅ 成功加载 PyTorch 模型")
+            elif model_file.endswith('.onnx'):
+                # 加载 ONNX 模型（兼容旧代码）
+                import onnxruntime as ort
+                self.onnx_session = ort.InferenceSession(model_file)
+                print("✅ 成功加载 ONNX 模型")
+            else:
+                raise ValueError("❌ 不支持的模型格式，请提供 .pkl 或 .trt 文件")
 
-    # 输入一个批次的状态，输出一个批次的动作概率和状态价值
-    def policy_value(self, state_batch):
-        self.policy_value_net.eval()
-        state_batch = torch.tensor(state_batch).to(self.device)
-        log_act_probs, value = self.policy_value_net(state_batch)
-        log_act_probs, value = log_act_probs.cpu(), value.cpu()
-        act_probs = np.exp(log_act_probs.detach().numpy())
-        return act_probs, value.detach().numpy()
-
-    # 输入棋盘，返回每个合法动作的（动作，概率）元组列表，以及棋盘状态的分数
     def policy_value_fn(self, board):
-        self.policy_value_net.eval()
-        # 获取合法动作列表
         legal_positions = [
             move_action2move_id[cchess.Move.uci(move)]
             for move in list(board.legal_moves)
         ]
+
         current_state = decode_board(board)
-        current_state = np.ascontiguousarray(
-            current_state.reshape(-1, 15, 10, 9)
-        ).astype("float16")
-        if self.stream is not None:
-            with torch.cuda.stream(self.stream):
-                current_state = torch.as_tensor(current_state).to(
-                    self.device, non_blocking=True
-                )
-                # 使用神经网络进行预测
-                with autocast(str(DEVICE)):  # 半精度fp16
-                    log_act_probs, value = self.policy_value_net(current_state)
-                log_act_probs, value = log_act_probs.to(
-                    "cpu", non_blocking=True
-                ), value.to("cpu", non_blocking=True)
-            torch.cuda.current_stream().wait_stream(self.stream)
+        current_state = np.ascontiguousarray(current_state.reshape(-1, 15, 10, 9)).astype("float32")
+
+        if self.trt_model is not None:
+            # print("使用 TensorRT 模型进行预测")
+            input_tensor = torch.from_numpy(current_state).to(self.device)
+            with torch.inference_mode():
+                if self.stream is not None:
+                    with torch.cuda.stream(self.stream):
+                        log_act_probs, value = self.trt_model(input_tensor)
+                    torch.cuda.current_stream().wait_stream(self.stream)
+                else:
+                    log_act_probs, value = self.trt_model(input_tensor)
+                log_act_probs, value = log_act_probs.cpu(), value.cpu()
+        elif self.onnx_session is not None:
+            # print("使用 ONNX 模型进行预测")
+            input_name = self.onnx_session.get_inputs()[0].name
+            outputs = self.onnx_session.run(None, {input_name: current_state})
+            log_act_probs, value = outputs[0], outputs[1]
         else:
-            current_state = torch.as_tensor(current_state).to(self.device)
-            with autocast(str(DEVICE)):  # 半精度fp16
-                print(f"使用{str(DEVICE)}推理")
-                log_act_probs, value = self.policy_value_net(current_state)
+            # print("使用 PyTorch 模型进行预测")
+            self.policy_value_net.eval()
+            with torch.no_grad():
+                input_tensor = torch.from_numpy(current_state).to(self.device)
+                log_act_probs, value = self.policy_value_net(input_tensor)
             log_act_probs, value = log_act_probs.cpu(), value.cpu()
-        # 只取出合法动作
-        act_probs = np.exp(log_act_probs.detach().numpy().astype("float16").flatten())
+
+        act_probs = np.exp(log_act_probs.flatten())
         act_probs = zip(legal_positions, act_probs[legal_positions])
-        # 返回动作概率，以及状态价值
-        return act_probs, value.detach().numpy()
 
-    # 保存模型
-    def save_model(self, model_file):
-        torch.save(self.policy_value_net.state_dict(), model_file)
-
-    # 执行一步训练
-    def train_step(self, state_batch, mcts_probs, winner_batch, lr=0.002):
-        self.policy_value_net.train()
-        # 包装变量
-        state_batch = torch.tensor(state_batch).to(self.device)
-        mcts_probs = torch.tensor(mcts_probs).to(self.device)
-        winner_batch = torch.tensor(winner_batch).to(self.device)
-        # 清零梯度
-        self.optimizer.zero_grad()
-        # 设置学习率
-        for params in self.optimizer.param_groups:
-            # 遍历Optimizer中的每一组参数，将该组参数的学习率 * 0.9
-            params["lr"] = lr
-        # 前向运算
-        log_act_probs, value = self.policy_value_net(state_batch)
-        value = torch.reshape(value, shape=[-1])
-        # 价值损失
-        value_loss = F.mse_loss(input=value, target=winner_batch)
-        # 策略损失
-        policy_loss = -torch.mean(
-            torch.sum(mcts_probs * log_act_probs, dim=1)
-        )  # 希望两个向量方向越一致越好
-        # 总的损失，注意l2惩罚已经包含在优化器内部
-        loss = value_loss + policy_loss
-        # 反向传播及优化
-        loss.backward()
-        self.optimizer.step()
-        # 计算策略的熵，仅用于评估模型
-        with torch.no_grad():
-            entropy = -torch.mean(
-                torch.sum(torch.exp(log_act_probs) * log_act_probs, dim=1)
-            )
-        return loss.detach().cpu().numpy(), entropy.detach().cpu().numpy()
+        return act_probs, value.item()

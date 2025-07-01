@@ -87,10 +87,8 @@ class MCTS:
         self.n_playout = n_playout
         self.cache = {}  # FEN 缓存，避免重复计算相同局面
 
+
     def playout(self, board):
-        """
-        执行一次模拟，从根节点开始直到叶节点，并进行评估和回溯更新
-        """
         node = self.root
         while True:
             if node.is_leaf():
@@ -101,14 +99,13 @@ class MCTS:
         fen = board.fen()
         if fen in self.cache:
             leaf_value = self.cache[fen]
-            action_probs, _ = self.policy(board)
+            action_probs, _ = self.policy(board)  # 重用缓存值
         else:
             action_probs, leaf_value = self.policy(board)
             self.cache[fen] = leaf_value
 
         if not board.is_game_over() and not is_tie(board):
             node.expand(action_probs)
-
         elif board.is_game_over():
             winner = cchess.RED if board.outcome().winner else cchess.BLACK
             leaf_value = 1.0 if winner == board.turn else -1.0

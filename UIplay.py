@@ -4,6 +4,7 @@ from game import Game
 import cchess
 from mcts import MCTS_AI
 from tools import move_id2move_action, move_action2move_id
+# from mcts_pure import MCTS_AI
 from net import PolicyValueNet
 import time
 
@@ -38,16 +39,10 @@ class Human:
 
 def run():
     # 加载模型
-    policy_value_net = PolicyValueNet(model_file='models/current_policy_batch300_2025-06-27_14-03-44.pkl', use_gpu=True)
+    policy_value_net = PolicyValueNet(model_file='models/current_policy_batch1710_2025-06-27_09-14-05.pkl', use_gpu=True)
 
     # 创建 MCTS 玩家
-    mcts_player = MCTS_AI(
-        policy_value_net.policy_value_fn,
-        c_puct=5,
-        n_playout=400,  # 减少模拟次数
-        is_selfplay=False
-    )
-
+    mcts_player = MCTS_AI(policy_value_net.policy_value_fn, n_playout=400)
     # 创建人类玩家
     human = Human()
 
